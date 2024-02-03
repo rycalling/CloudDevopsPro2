@@ -1,23 +1,16 @@
-AWSTemplateFormatVersion: 2010-09-09
 Description: >
     RAHUL YADAV Application Configuration file template
-
+    
 Parameters:
+  EnvironmentName:
+    Description: An environment name that will be prefixed to resource names
+    Type: String
 
-    EnvironmentName:
-      Description: An environment name that will be prefixed to resource names
-      Type: String
-Mappings:
-  RegionMap:
-    us-east-2:
-      AMI: ami-05fb0b8c1424f266b
-    us-west-2:
-      AMI: ami-008fe2fc65df48dac
 Resources:
   LBSecGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow http to our load balancer
+      GroupDescription: Allow http access to our load balancer
       VpcId:
         Fn::ImportValue:
           !Sub "${EnvironmentName}-VPCID"
@@ -26,15 +19,11 @@ Resources:
         FromPort: 80
         ToPort: 80
         CidrIp: 0.0.0.0/0
-      SecurityGroupEgress:
-      - IpProtocol: tcp
-        FromPort: 80
-        ToPort: 80
-        CidrIp: 0.0.0.0/0
+
   WebServerSecGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow http to our hosts and SSH from local only
+      GroupDescription: Allow http access to our hosts from the LB Security Group
       VpcId:
         Fn::ImportValue:
           !Sub "${EnvironmentName}-VPCID"
@@ -42,58 +31,74 @@ Resources:
       - IpProtocol: tcp
         FromPort: 80
         ToPort: 80
-        CidrIp: 0.0.0.0/0
-      - IpProtocol: tcp
-        FromPort: 22
-        ToPort: 22
-        CidrIp: 0.0.0.0/0
+        SourceSecurityGroupId: !Ref LBSecGroup
       SecurityGroupEgress:
       - IpProtocol: tcp
         FromPort: 0
         ToPort: 65535
         CidrIp: 0.0.0.0/0
-  WebAppLaunchConfig:
-    Type: AWS::AutoScaling::LaunchConfiguration
+ 
+  WebAppLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties: 
+      LaunchTemplateName: !Sub "${EnvironmentName}-web-servers"
+      LaunchTemplateData:
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            sudo apt-get update -y
+            sudo apt-get install nginx awscli -y
+            sudo rm /var/www/html/index.html
+            sudo aws s3 cp s3://udagrambucket/index.html /var/www/html
+            sudo service nginx start
+            
+        ImageId: ami-05fb0b8c1424f266b
+        SecurityGroupIds:
+          - !Ref WebServerSecGroup
+        InstanceType: t3.small
+        BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"
+          Ebs:
+            VolumeSize: '10'
+        IamInstanceProfile:
+          Name: !Ref WebAppInstanceProfile
+  
+  WebAppInstanceRole:
+    Type: AWS::IAM::Role
     Properties:
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          apt-get update -y
-          apt-get install unzip awscli -y
-          apt-get install apache2 -y
-          systemctl start apache2.service
-          sudo rm /var/www/html/index.html
-          sudo aws s3 cp s3://udacity-demo-1/udacity.zip /var/www/html
-          sudo unzip /var/www/html/udacity.zip -d /var/www/html
-          systemctl restart apache2.service
-      ImageId:
-        !FindInMap 
-          - RegionMap
-          - !Ref AWS::Region
-          - AMI
-      IamInstanceProfile:
-        Fn::ImportValue: !Sub "${EnvironmentName}-IAM-NAME"
-      SecurityGroups:
-      - Ref: WebServerSecGroup
-      InstanceType: t2.micro
-      BlockDeviceMappings:
-      - DeviceName: "/dev/sdk"
-        Ebs:
-          VolumeSize: '10'
-          DeleteOnTermination: true
+      RoleName: !Sub "${EnvironmentName}-web-servers"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: 'Allow'
+          Principal:
+            Service:
+            - 'ec2.amazonaws.com'
+          Action:
+          - 'sts:AssumeRole'
+
+  WebAppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: '/'
+      Roles:
+      - !Ref WebAppInstanceRole
+
   WebAppGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
       VPCZoneIdentifier:
       - Fn::ImportValue: 
           !Sub "${EnvironmentName}-PRIV-NETS"
-      LaunchConfigurationName:
-        Ref: WebAppLaunchConfig
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebAppLaunchTemplate
+        Version: !GetAtt WebAppLaunchTemplate.LatestVersionNumber
       MinSize: '1'
-      MaxSize: '3'
-      DesiredCapacity: "2"
+      DesiredCapacity: '1'
+      MaxSize: '4'
       TargetGroupARNs:
       - Ref: WebAppTargetGroup
+
   WebAppLB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
@@ -102,6 +107,7 @@ Resources:
       - Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-SN"
       SecurityGroups:
       - Ref: LBSecGroup
+
   Listener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -113,6 +119,7 @@ Resources:
         Ref: WebAppLB
       Port: '80'
       Protocol: HTTP
+
   ALBListenerRule:
       Type: AWS::ElasticLoadBalancingV2::ListenerRule
       Properties:
@@ -124,10 +131,11 @@ Resources:
           Values: [/]
         ListenerArn: !Ref 'Listener'
         Priority: 1
+
   WebAppTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      HealthCheckIntervalSeconds: 20
+      HealthCheckIntervalSeconds: 10
       HealthCheckPath: /
       HealthCheckProtocol: HTTP
       HealthCheckTimeoutSeconds: 8
@@ -140,8 +148,9 @@ Resources:
           Fn::Sub: "${EnvironmentName}-VPCID"
 
 Outputs:
-  Website:
-    Value: !Sub http://${WebAppLB.DNSName}
-    Description: Public DNS of LoadBalancer
+
+  LBPublicURL:
+    Description: The URL of the ALB
+    Value: !Join [ "", [ 'http://', !GetAtt WebAppLB.DNSName ]]
     Export:
-      Name: !Sub ${EnvironmentName}-Public-DNS-URL
+      Name: !Sub "${EnvironmentName}-LBPublicURL"

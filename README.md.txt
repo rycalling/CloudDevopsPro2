@@ -22,3 +22,6 @@ aws cloudformation create-stack --stack-name projectUdagramRahulApp --template-b
 ## Tear down instructions
 /delete.sh <stack name> <region name> or
 aws cloudformation delete-stack --stack-name <stack name> --region=<region name>
+
+
+the project can be accessed at: http://projec-webap-ztytbcdgwg4f-234913650.us-east-2.elb.amazonaws.com/
